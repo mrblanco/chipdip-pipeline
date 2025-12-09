@@ -70,6 +70,14 @@ min_oligos: 2
 proportion: 0.8
 max_size: 10000
 
+# Generate FASTQ files for individual targets from unaligned reads
+# - These are generated early in the pipeline (before alignment and deduplication)
+# - Useful for calculating duplication rates per protein
+generate_splitfastqs: true
+
+# Pseudo-UMI length for FASTQ headers (ATGC encoding of cluster barcode hash)
+pseudo_umi_length: 16
+
 # bigWig generation parameters
 # - only relevant if generate_splitbams is True
 # - binsize: bin size in bp

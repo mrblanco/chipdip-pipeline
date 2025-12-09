@@ -228,6 +228,17 @@ if binsize and bigwig_normalization == "RPGC":
 path_pipeline_structure = workflow.source_path("pipeline.yaml")
 
 ##############################################################################
+# Split FASTQs (early in pipeline, before alignment)
+##############################################################################
+
+generate_splitfastqs = config.get("generate_splitfastqs", False)
+pseudo_umi_length = config.get("pseudo_umi_length", 16)
+
+if generate_splitfastqs:
+    print("Will generate FASTQ files for individual targets from unaligned reads", file=sys.stderr)
+    print(f"Pseudo-UMI length: {pseudo_umi_length}", file=sys.stderr)
+
+##############################################################################
 # Location of scripts
 ##############################################################################
 
@@ -241,6 +252,7 @@ extract_barcode_to_tags = os.path.join(DIR_SCRIPTS, "python", "extract_barcode_t
 deduplicate_bam = os.path.join(DIR_SCRIPTS, "python", "deduplicate_bam.py")
 bpm_fastq_to_bam = os.path.join(DIR_SCRIPTS, "python", "bpm_fastq_to_bam.py")
 assign_label = os.path.join(DIR_SCRIPTS, "python", "assign_label.py")
+assign_and_split_fastqs = os.path.join(DIR_SCRIPTS, "python", "assign_and_split_fastqs.py")
 plot_cluster_read_counts = os.path.join(DIR_SCRIPTS, "python", "plot_cluster_read_counts.py")
 plot_cluster_bpm_max_rep = os.path.join(DIR_SCRIPTS, "python", "plot_cluster_bpm_max_rep.py")
 count_unmasked_bases = os.path.join(DIR_SCRIPTS, "python", "count_unmasked_bases.py")
@@ -470,6 +482,28 @@ SPLITBAMS_MERGED_INDEXED = expand(
 )
 
 ##############################################################################
+# Split FASTQs outputs
+##############################################################################
+
+# Note: TARGETS is defined when generate_splitbams=true, includes antibody IDs and unassigned categories
+# We reuse this list for splitfastqs since they should match
+
+SPLITFASTQS = expand(
+    os.path.join(DIR_OUT, "splitfastqs", "{sample}.{target}_R{read}.fastq.gz"),
+    sample=ALL_SAMPLES,
+    target=TARGETS,
+    read=[1, 2]
+)
+
+SPLITFASTQ_COUNTS = [os.path.join(DIR_OUT, "splitfastqs", "splitfastq_counts.txt")]
+
+SPLITFASTQS_MERGED = expand(
+    os.path.join(DIR_OUT, "splitfastqs", "{target}_R{read}.fastq.gz"),
+    target=TARGETS,
+    read=[1, 2]
+)
+
+##############################################################################
 # BigWigs
 ##############################################################################
 
@@ -496,6 +530,10 @@ if generate_splitbams:
         FINAL.extend(BIGWIGS)
         if merge_samples:
             FINAL.extend(BIGWIGS_MERGED)
+if generate_splitfastqs:
+    FINAL.extend(SPLITFASTQS + SPLITFASTQ_COUNTS)
+    if merge_samples:
+        FINAL.extend(SPLITFASTQS_MERGED)
 
 if path_pipeline_structure:
     with open(path_pipeline_structure) as f:
@@ -733,6 +771,130 @@ rule split_bpm_dpm:
     shell:
         '''
         python "{split_bpm_dpm}" --r1 "{input}" {params.format} &> "{log}"
+        '''
+
+##############################################################################
+# Split FASTQs by protein assignment (early pipeline, before alignment)
+##############################################################################
+
+rule assign_and_split_fastqs_per_sample:
+    input:
+        dpm_fastqs_r1 = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_dpm.fastq.gz"),
+            splitid=NUM_CHUNKS
+        ),
+        dpm_fastqs_r2 = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded.fastq.gz"),
+            splitid=NUM_CHUNKS
+        ),
+        bpm_fastqs = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_bpm.fastq.gz"),
+            splitid=NUM_CHUNKS
+        ),
+        config = CONFIG
+    output:
+        splitfastqs = expand(
+            os.path.join(DIR_OUT, "splitfastqs", "{{sample}}.{target}_R{read}.fastq.gz"),
+            target=TARGETS,
+            read=[1, 2]
+        ),
+        stats = os.path.join(DIR_OUT, "splitfastqs", "{sample}.assignment_stats.txt")
+    log:
+        os.path.join(DIR_LOGS, "assign_and_split_fastqs.{sample}.log")
+    params:
+        output_dir = os.path.join(DIR_OUT, "splitfastqs"),
+        sample = "{sample}",
+        min_oligos = min_oligos,
+        proportion = proportion,
+        max_size = max_size,
+        num_tags = num_tags,
+        pseudo_umi_length = pseudo_umi_length,
+        targets = TARGETS  # Pass expected targets to ensure all output files created
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        python "{assign_and_split_fastqs}" \
+            --dpm_fastqs_r1 {input.dpm_fastqs_r1} \
+            --dpm_fastqs_r2 {input.dpm_fastqs_r2} \
+            --bpm_fastqs {input.bpm_fastqs} \
+            --output_dir "{params.output_dir}" \
+            --sample "{params.sample}" \
+            --min_oligos {params.min_oligos} \
+            --proportion {params.proportion} \
+            --max_size {params.max_size} \
+            --num_tags {params.num_tags} \
+            --pseudo_umi_length {params.pseudo_umi_length} \
+            --targets {params.targets} \
+            --output_stats "{output.stats}" \
+            &> "{log}"
+        '''
+
+# For each target, merge splitfastqs across samples
+rule splitfastqs_merged:
+    input:
+        expand(
+            os.path.join(DIR_OUT, "splitfastqs", "{sample}.{{target}}_R{{read}}.fastq.gz"),
+            sample=ALL_SAMPLES
+        )
+    output:
+        os.path.join(DIR_OUT, "splitfastqs", "{target}_R{read}.fastq.gz")
+    log:
+        os.path.join(DIR_LOGS, "splitfastqs_merged.{target}.R{read}.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        {{
+            # check which input FASTQ files are non-empty
+            all_paths=({input:q})
+            non_empty_paths=()
+            for path in "${{all_paths[@]}}"; do
+                if [ -s "$path" ]; then
+                    non_empty_paths+=("$path")
+                fi
+            done
+
+            if [ ${{#non_empty_paths[@]}} -eq 0 ]; then
+                echo "All FASTQ files for the target are empty. Creating empty merged FASTQ file."
+                touch "{output}"
+            else
+                cat "${{non_empty_paths[@]}}" > "{output}"
+            fi
+        }} &> "{log}"
+        '''
+
+# Count the number of reads in each target FASTQ file
+rule splitfastq_counts:
+    input:
+        SPLITFASTQS + (SPLITFASTQS_MERGED if merge_samples else [])
+    output:
+        SPLITFASTQ_COUNTS
+    log:
+        os.path.join(DIR_LOGS, "splitfastq_counts.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        {{
+            paths=({input:q})
+            for path in "${{paths[@]}}"; do
+                if [ -s "$path" ]; then
+                    # file is non-empty; count reads (lines / 4)
+                    count=$(zcat "$path" | wc -l | awk '{{print $1/4}}')
+                else
+                    # file is empty
+                    count=0
+                fi
+                echo -e "${{path}}\\t${{count}}" >> "{output}"
+            done
+        }} &> "{log}"
         '''
 
 ##############################################################################
