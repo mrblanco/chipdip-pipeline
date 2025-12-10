@@ -1,0 +1,513 @@
+"""
+Streamlined Snakemake workflow for ChIP-DIP splitfastq generation
+This workflow runs only the steps needed to generate split FASTQ files by protein target
+"""
+
+import json
+import os
+import re
+import sys
+import datetime
+
+import yaml
+import pandas as pd
+
+##############################################################################
+# Initialize settings
+##############################################################################
+
+v = datetime.datetime.now()
+run_date = v.strftime("%Y.%m.%d")
+
+configfile: "config/config.yaml"
+
+##############################################################################
+# Load required settings
+##############################################################################
+
+barcode_config = config.get("barcode_config")
+if barcode_config not in (None, ""):
+    print("Using barcode config:", barcode_config, file=sys.stderr)
+else:
+    print("Missing barcode config (barcode_config) in config.yaml", file=sys.stderr)
+    sys.exit()
+
+samples = config.get("samples")
+if samples not in (None, ""):
+    print("Using samples file:", samples, file=sys.stderr)
+else:
+    print("Missing samples file (samples) in config.yaml", file=sys.stderr)
+    sys.exit()
+
+DIR_SCRIPTS = config.get("scripts_dir")
+if DIR_SCRIPTS is None:
+    print("Scripts directory (scripts_dir) not specificed in config.yaml", file=sys.stderr)
+    sys.exit()
+
+def get_num_tags(path_config):
+    """Parse a BarcodeID config file and return the number of tags (DPM, ODD, EVEN, Y) as an integer."""
+    num_tags = 0
+    with open(path_config) as f:
+        n_lines_processed = 0
+        for line in f:
+            if line.strip() == "" or line.startswith("#"):
+                continue
+            if n_lines_processed >= 2:
+                break
+            line = line.strip().upper()
+            if line.startswith("READ1") or line.startswith("READ2"):
+                num_tags += line.count("DPM") + line.count("ODD") + line.count("EVEN") + line.count("Y")
+            n_lines_processed += 1
+    return num_tags
+
+try:
+    num_tags = get_num_tags(barcode_config)
+    print("Using", num_tags, "tags", file=sys.stderr)
+except:
+    print("Could not determine number of tags from BarcodeID config file.", file=sys.stderr)
+    sys.exit()
+
+##############################################################################
+# Load optional settings
+##############################################################################
+
+DIR_OUT = config.get("output_dir", "results")
+print("Using output directory:", DIR_OUT, file=sys.stderr)
+
+temp_dir = config.get("temp_dir")
+if temp_dir is not None:
+    print("Using temporary directory:", temp_dir, file=sys.stderr)
+else:
+    if "TMPDIR" in os.environ:
+        temp_dir = os.environ["TMPDIR"]
+    else:
+        temp_dir = "/tmp"
+    print("Defaulting to temporary directory:", temp_dir, file=sys.stderr)
+    if not os.path.exists(temp_dir):
+        print(f"Creating temporary directory {temp_dir}.", file=sys.stderr)
+        os.makedirs(temp_dir, exist_ok=True)
+
+num_chunks = config.get("num_chunks")
+if num_chunks is not None:
+    num_chunks = int(num_chunks)
+    assert num_chunks > 0 and num_chunks < 100, "num_chunks must be an integer between 1 and 99."
+    print(f"Splitting FASTQ files into {num_chunks} chunks for parallel processing", file=sys.stderr)
+else:
+    num_chunks = 2
+    print("Defaulting to 2 chunks for parallel processing", file=sys.stderr)
+
+conda_env = config.get("conda_env")
+if conda_env is None:
+    conda_env = "envs/chipdip.yaml"
+    print("No conda environment specified. Defaulting to envs/chipdip.yaml", file=sys.stderr)
+if conda_env.strip().lower().endswith((".yaml", ".yml")):
+    print("Will create new conda environment from", conda_env, file=sys.stderr)
+else:
+    print("Using existing conda environment:", conda_env, file=sys.stderr)
+
+barcode_format = config.get("barcode_format")
+if barcode_format not in (None, ""):
+    print("Using barcode format file:", barcode_format, file=sys.stderr)
+else:
+    print("(WARNING) Barcode format file not specified. The pipeline will NOT ensure barcodes are valid.", file=sys.stderr)
+
+merge_samples = config.get("merge_samples", False)
+
+# Splitbams settings (needed for TARGETS definition)
+generate_splitbams = config.get("generate_splitbams", False)
+if generate_splitbams:
+    min_oligos = config.get("min_oligos", 2)
+    proportion = config.get("proportion", 0.8)
+    max_size = config.get("max_size", 10000)
+    print("Using splitbam parameters for target definition:", file=sys.stderr)
+    print("\tmin_oligos:", min_oligos, file=sys.stderr)
+    print("\tproportion:", proportion, file=sys.stderr)
+    print("\tmax_size:", max_size, file=sys.stderr)
+
+# Splitfastqs settings
+generate_splitfastqs = config.get("generate_splitfastqs", False)
+pseudo_umi_length = config.get("pseudo_umi_length", 16)
+
+if generate_splitfastqs:
+    print("Will generate FASTQ files for individual targets from unaligned reads", file=sys.stderr)
+    print(f"Pseudo-UMI length: {pseudo_umi_length}", file=sys.stderr)
+else:
+    print("ERROR: generate_splitfastqs must be true for this workflow", file=sys.stderr)
+    sys.exit()
+
+##############################################################################
+# Location of scripts
+##############################################################################
+
+split_fastq = os.path.join(DIR_SCRIPTS, "bash", "split_fastq.sh")
+barcode_id_jar = os.path.join(DIR_SCRIPTS, "java", "BarcodeIdentification_v1.2.0.jar")
+split_bpm_dpm = os.path.join(DIR_SCRIPTS, "python", "split_bpm_dpm.py")
+
+##############################################################################
+# Define directories
+##############################################################################
+
+DIR_LOGS = os.path.join(DIR_OUT, "logs")
+CONFIG = os.path.join(DIR_LOGS, f"config_{run_date}.yaml")
+
+##############################################################################
+# Load sample information
+##############################################################################
+
+with open(samples) as f:
+    SAMPLES_DICT = json.load(f)
+
+ALL_SAMPLES = list(SAMPLES_DICT.keys())
+print(f"Samples to be processed: {', '.join(ALL_SAMPLES)}", file=sys.stderr)
+
+##############################################################################
+# Define split IDs for parallel processing
+##############################################################################
+
+NUM_CHUNKS = list(range(0, num_chunks))
+SPLITIDS = [f"{x:02d}" for x in NUM_CHUNKS]
+
+##############################################################################
+# Define TARGETS (antibody IDs and unassigned categories)
+##############################################################################
+
+if generate_splitbams:
+    # Read barcode config file, skipping header lines and comments
+    # Only extract entries that start with BEAD_ (antibody barcodes, not DPM barcodes)
+    bead_barcodes = []
+    with open(barcode_config, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines, comments, and header lines
+            if not line or line.startswith('#') or line.startswith('READ'):
+                continue
+            # Parse tab-separated lines: DPM\tBEAD_AB1-A1\t...
+            parts = line.split('\t')
+            if len(parts) >= 2 and parts[0] == 'DPM' and parts[1].startswith('BEAD_'):
+                bead_barcodes.append(parts[1])
+
+    BEAD_BARCODES = sorted(set(bead_barcodes))
+    TARGETS = sorted(BEAD_BARCODES + ["none", "uncertain", "ambiguous", "filtered", "BPM"])
+    print(f"Found {len(BEAD_BARCODES)} antibody targets", file=sys.stderr)
+    print(f"Targets: {', '.join(TARGETS)}", file=sys.stderr)
+else:
+    print("ERROR: generate_splitbams must be true to define TARGETS", file=sys.stderr)
+    sys.exit()
+
+##############################################################################
+# Define output files
+##############################################################################
+
+SPLITFASTQS = expand(
+    os.path.join(DIR_OUT, "splitfastqs", "{sample}.{target}_R{read}.fastq.gz"),
+    sample=ALL_SAMPLES,
+    target=TARGETS,
+    read=[1, 2]
+)
+
+SPLITFASTQ_COUNTS = [os.path.join(DIR_OUT, "splitfastqs", "splitfastq_counts.txt")]
+
+SPLITFASTQS_MERGED = expand(
+    os.path.join(DIR_OUT, "splitfastqs", "{target}_R{read}.fastq.gz"),
+    target=TARGETS,
+    read=[1, 2]
+)
+
+# Define final outputs
+FINAL = SPLITFASTQS + SPLITFASTQ_COUNTS
+if merge_samples:
+    FINAL.extend(SPLITFASTQS_MERGED)
+
+##############################################################################
+# RULES
+##############################################################################
+
+rule all:
+    input:
+        FINAL
+
+wildcard_constraints:
+    sample = r"[^\.]+",
+    target = "|".join([re.escape(x) for x in TARGETS])
+
+##############################################################################
+# Log config file
+##############################################################################
+
+rule log_config:
+    output:
+        CONFIG
+    run:
+        os.makedirs(DIR_LOGS, exist_ok=True)
+        with open(output[0], "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+
+##############################################################################
+# Split FASTQ files into chunks for parallel processing
+##############################################################################
+
+rule split_fastq:
+    wildcard_constraints:
+        read="R1|R2"
+    input:
+        lambda wildcards: SAMPLES_DICT[wildcards.sample][wildcards.read]
+    output:
+        temp(expand(os.path.join(temp_dir, "{{sample}}_{{read}}.part_{splitid}.fastq"), splitid=SPLITIDS))
+    log:
+        os.path.join(DIR_LOGS, "split_fastq.{sample}.{read}.log")
+    params:
+        dir = temp_dir,
+        prefix = "{sample}_{read}.part_"
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        bash "{split_fastq}" {num_chunks} "{params.dir}" "{params.prefix}" {threads} {input:q} &> "{log}"
+        '''
+
+
+##############################################################################
+# Compress split FASTQ chunks
+##############################################################################
+
+rule compress_fastq:
+    input:
+        os.path.join(temp_dir, "{sample}_R{read}.part_{splitid}.fastq")
+    output:
+        temp(os.path.join(temp_dir, "{sample}_R{read}.part_{splitid}.fastq.gz"))
+    log:
+        os.path.join(DIR_LOGS, "compress_fastq.{sample}.R{read}.part_{splitid}.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        pigz -p {threads} -c {input} > {output} 2> "{log}"
+        '''
+
+##############################################################################
+# Trim adaptors
+##############################################################################
+
+rule adaptor_trimming:
+    input:
+        r1 = os.path.join(temp_dir, "{sample}_R1.part_{splitid}.fastq.gz"),
+        r2 = os.path.join(temp_dir, "{sample}_R2.part_{splitid}.fastq.gz")
+    output:
+        r1 = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.trimmed.fastq.gz")),
+        r2 = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz"))
+    log:
+        os.path.join(DIR_LOGS, "adaptor_trimming.{sample}.part_{splitid}.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        cutadapt \\
+            -j {threads} \\
+            -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA \\
+            -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \\
+            -o {output.r1} \\
+            -p {output.r2} \\
+            {input.r1} \\
+            {input.r2} \\
+            &> "{log}"
+        '''
+
+##############################################################################
+# Barcode identification
+##############################################################################
+
+rule barcode_id:
+    input:
+        r1 = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.trimmed.fastq.gz"),
+        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz"),
+        config = barcode_config,
+        format = barcode_format if barcode_format not in (None, "") else []
+    output:
+        r1_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz")),
+        r2_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz")),
+        stats = os.path.join(DIR_OUT, "qc", "{sample}.part_{splitid}.barcode_stats.txt")
+    log:
+        os.path.join(DIR_LOGS, "barcode_id.{sample}.part_{splitid}.log")
+    params:
+        format_arg = f"-f {barcode_format}" if barcode_format not in (None, "") else ""
+    conda:
+        conda_env
+    threads:
+        1
+    shell:
+        '''
+        java -jar "{barcode_id_jar}" \\
+            -c {input.config} \\
+            {params.format_arg} \\
+            -r1 {input.r1} \\
+            -r2 {input.r2} \\
+            -o1 {output.r1_barcoded} \\
+            -o2 {output.r2_barcoded} \\
+            -s {output.stats} \\
+            &> "{log}"
+        '''
+
+##############################################################################
+# Split BPM and DPM reads
+##############################################################################
+
+rule split_bpm_dpm:
+    input:
+        r1 = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz"),
+        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz")
+    output:
+        r1_dpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_dpm.fastq.gz")),
+        r2_dpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded_dpm.fastq.gz")),
+        r1_bpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_bpm.fastq.gz"))
+    log:
+        os.path.join(DIR_LOGS, "split_bpm_dpm.{sample}.part_{splitid}.log")
+    conda:
+        conda_env
+    threads:
+        1
+    shell:
+        '''
+        python "{split_bpm_dpm}" \\
+            --r1 {input.r1} \\
+            --r2 {input.r2} \\
+            --r1_dpm {output.r1_dpm} \\
+            --r2_dpm {output.r2_dpm} \\
+            --r1_bpm {output.r1_bpm} \\
+            &> "{log}"
+        '''
+
+##############################################################################
+# Assign clusters and split FASTQs by protein target
+##############################################################################
+
+rule assign_and_split_fastqs_per_sample:
+    input:
+        dpm_fastqs_r1 = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_dpm.fastq.gz"),
+            splitid=SPLITIDS
+        ),
+        dpm_fastqs_r2 = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded_dpm.fastq.gz"),
+            splitid=SPLITIDS
+        ),
+        bpm_fastqs = expand(
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_bpm.fastq.gz"),
+            splitid=SPLITIDS
+        ),
+        config = CONFIG
+    output:
+        splitfastqs = expand(
+            os.path.join(DIR_OUT, "splitfastqs", "{{sample}}.{target}_R{read}.fastq.gz"),
+            target=TARGETS,
+            read=[1, 2]
+        ),
+        stats = os.path.join(DIR_OUT, "splitfastqs", "{sample}.assignment_stats.txt")
+    log:
+        os.path.join(DIR_LOGS, "assign_and_split_fastqs.{sample}.log")
+    params:
+        output_dir = os.path.join(DIR_OUT, "splitfastqs"),
+        sample = "{sample}",
+        min_oligos = min_oligos,
+        proportion = proportion,
+        max_size = max_size,
+        num_tags = num_tags,
+        pseudo_umi_length = pseudo_umi_length,
+        targets = TARGETS
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        python "{DIR_SCRIPTS}/python/assign_and_split_fastqs.py" \\
+            --dpm_fastqs_r1 {input.dpm_fastqs_r1} \\
+            --dpm_fastqs_r2 {input.dpm_fastqs_r2} \\
+            --bpm_fastqs {input.bpm_fastqs} \\
+            --output_dir "{params.output_dir}" \\
+            --sample "{params.sample}" \\
+            --min_oligos {params.min_oligos} \\
+            --proportion {params.proportion} \\
+            --max_size {params.max_size} \\
+            --num_tags {params.num_tags} \\
+            --pseudo_umi_length {params.pseudo_umi_length} \\
+            --targets {params.targets} \\
+            --output_stats "{output.stats}" \\
+            &> "{log}"
+        '''
+
+##############################################################################
+# Merge splitfastqs across samples
+##############################################################################
+
+rule splitfastqs_merged:
+    input:
+        expand(
+            os.path.join(DIR_OUT, "splitfastqs", "{sample}.{{target}}_R{{read}}.fastq.gz"),
+            sample=ALL_SAMPLES
+        )
+    output:
+        os.path.join(DIR_OUT, "splitfastqs", "{target}_R{read}.fastq.gz")
+    log:
+        os.path.join(DIR_LOGS, "splitfastqs_merged.{target}.R{read}.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        {{
+            # check which input FASTQ files are non-empty
+            all_paths=({input:q})
+            non_empty_paths=()
+            for path in "${{all_paths[@]}}"; do
+                if [ -s "$path" ]; then
+                    non_empty_paths+=("$path")
+                fi
+            done
+
+            if [ ${{#non_empty_paths[@]}} -eq 0 ]; then
+                echo "All FASTQ files for the target are empty. Creating empty merged FASTQ file."
+                touch "{output}"
+            else
+                cat "${{non_empty_paths[@]}}" > "{output}"
+            fi
+        }} &> "{log}"
+        '''
+
+##############################################################################
+# Count reads in splitfastqs
+##############################################################################
+
+rule splitfastq_counts:
+    input:
+        SPLITFASTQS + (SPLITFASTQS_MERGED if merge_samples else [])
+    output:
+        SPLITFASTQ_COUNTS
+    log:
+        os.path.join(DIR_LOGS, "splitfastq_counts.log")
+    conda:
+        conda_env
+    threads:
+        4
+    shell:
+        '''
+        {{
+            paths=({input:q})
+            for path in "${{paths[@]}}"; do
+                if [ -s "$path" ]; then
+                    # file is non-empty; count reads (lines / 4)
+                    count=$(zcat "$path" | wc -l | awk '{{print $1/4}}')
+                else
+                    # file is empty
+                    count=0
+                fi
+                echo -e "${{path}}\\t${{count}}" >> "{output}"
+            done
+        }} &> "{log}"
+        '''
