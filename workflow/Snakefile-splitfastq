@@ -325,17 +325,12 @@ rule adaptor_trimming:
 rule barcode_id:
     input:
         r1 = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.trimmed.fastq.gz"),
-        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz"),
-        config = barcode_config,
-        format = barcode_format if barcode_format not in (None, "") else []
+        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz")
     output:
         r1_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz")),
-        r2_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz")),
-        stats = os.path.join(DIR_OUT, "qc", "{sample}.part_{splitid}.barcode_stats.txt")
+        r2_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz"))
     log:
         os.path.join(DIR_LOGS, "barcode_id.{sample}.part_{splitid}.log")
-    params:
-        format_arg = f"-f {barcode_format}" if barcode_format not in (None, "") else ""
     conda:
         conda_env
     threads:
@@ -343,14 +338,9 @@ rule barcode_id:
     shell:
         '''
         java -jar "{barcode_id_jar}" \\
-            -c {input.config} \\
-            {params.format_arg} \\
-            -r1 {input.r1} \\
-            -r2 {input.r2} \\
-            -o1 {output.r1_barcoded} \\
-            -o2 {output.r2_barcoded} \\
-            -s {output.stats} \\
-            &> "{log}"
+            --input1 "{input.r1}" --input2 "{input.r2}" \\
+            --output1 "{output.r1_barcoded}" --output2 "{output.r2_barcoded}" \\
+            --config "{barcode_config}" &> "{log}"
         '''
 
 ##############################################################################
