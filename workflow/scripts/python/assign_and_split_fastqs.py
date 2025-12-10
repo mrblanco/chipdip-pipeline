@@ -395,7 +395,8 @@ def main():
     print("assign_and_split_fastqs.py", file=sys.stderr)
     print("=" * 80, file=sys.stderr)
     print(f"Sample: {args.sample}", file=sys.stderr)
-    print(f"DPM FASTQ files: {len(args.dpm_fastqs)}", file=sys.stderr)
+    print(f"DPM R1 FASTQ files: {len(args.dpm_fastqs_r1)}", file=sys.stderr)
+    print(f"DPM R2 FASTQ files: {len(args.dpm_fastqs_r2)}", file=sys.stderr)
     print(f"BPM FASTQ files: {len(args.bpm_fastqs)}", file=sys.stderr)
     print(f"Output directory: {args.output_dir}", file=sys.stderr)
     print(f"Targets: {', '.join(args.targets)}", file=sys.stderr)
@@ -405,7 +406,7 @@ def main():
 
     # Step 1: Assign clusters based on BPM/DPM counts
     assignments = assign_clusters_from_fastq(
-        args.dpm_fastqs,
+        args.dpm_fastqs_r1,
         args.bpm_fastqs,
         args.min_oligos,
         args.proportion,
@@ -416,7 +417,8 @@ def main():
 
     # Step 2: Split DPM FASTQ files by assignment
     read_counts = split_fastqs_by_assignment(
-        args.dpm_fastqs,
+        args.dpm_fastqs_r1,
+        args.dpm_fastqs_r2,
         assignments,
         args.output_dir,
         args.sample,
