@@ -354,27 +354,21 @@ rule barcode_id:
 
 rule split_bpm_dpm:
     input:
-        r1 = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz"),
-        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz")
+        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz")
     output:
-        r1_dpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_dpm.fastq.gz")),
-        r2_dpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded_dpm.fastq.gz")),
-        r1_bpm = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_bpm.fastq.gz"))
+        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_dpm.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_bpm.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_other.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_short.fastq.gz")
     log:
-        os.path.join(DIR_LOGS, "split_bpm_dpm.{sample}.part_{splitid}.log")
+        os.path.join(DIR_LOGS, "split_bpm_dpm.{sample}.{splitid}.log")
+    params:
+        format = f"--format '{barcode_format}'" if barcode_format not in (None, "") else ""
     conda:
         conda_env
-    threads:
-        1
     shell:
         '''
-        python "{split_bpm_dpm}" \\
-            --r1 {input.r1} \\
-            --r2 {input.r2} \\
-            --r1_dpm {output.r1_dpm} \\
-            --r2_dpm {output.r2_dpm} \\
-            --r1_bpm {output.r1_bpm} \\
-            &> "{log}"
+        python "{split_bpm_dpm}" --r1 "{input}" {params.format} &> "{log}"
         '''
 
 ##############################################################################
@@ -388,7 +382,7 @@ rule assign_and_split_fastqs_per_sample:
             splitid=SPLITIDS
         ),
         dpm_fastqs_r2 = expand(
-            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded_dpm.fastq.gz"),
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded.fastq.gz"),
             splitid=SPLITIDS
         ),
         bpm_fastqs = expand(
