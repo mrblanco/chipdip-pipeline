@@ -274,18 +274,16 @@ rule split_fastq:
 
 rule compress_fastq:
     input:
-        os.path.join(temp_dir, "{sample}_R{read}.part_{splitid}.fastq")
+        os.path.join(temp_dir, "{sample_read}.part_{splitid}.fastq")
     output:
-        temp(os.path.join(temp_dir, "{sample}_R{read}.part_{splitid}.fastq.gz"))
-    log:
-        os.path.join(DIR_LOGS, "compress_fastq.{sample}.R{read}.part_{splitid}.log")
+        os.path.join(temp_dir, "{sample_read}.part_{splitid}.fastq.gz")
     conda:
         conda_env
     threads:
-        4
+        8
     shell:
         '''
-        pigz -p {threads} -c {input} > {output} 2> "{log}"
+        pigz -p {threads} "{input}"
         '''
 
 ##############################################################################
@@ -294,28 +292,37 @@ rule compress_fastq:
 
 rule adaptor_trimming:
     input:
-        r1 = os.path.join(temp_dir, "{sample}_R1.part_{splitid}.fastq.gz"),
-        r2 = os.path.join(temp_dir, "{sample}_R2.part_{splitid}.fastq.gz")
+        [os.path.join(temp_dir, "{sample}_R1.part_{splitid}.fastq.gz"),
+         os.path.join(temp_dir, "{sample}_R2.part_{splitid}.fastq.gz")]
     output:
-        r1 = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.trimmed.fastq.gz")),
-        r2 = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz"))
+         os.path.join(DIR_OUT, "trimmed", "{sample}_R1.part_{splitid}_val_1.fq.gz"),
+         os.path.join(DIR_OUT, "trimmed", "{sample}_R1.part_{splitid}.fastq.gz_trimming_report.txt"),
+         os.path.join(DIR_OUT, "trimmed", "{sample}_R2.part_{splitid}_val_2.fq.gz"),
+         os.path.join(DIR_OUT, "trimmed", "{sample}_R2.part_{splitid}.fastq.gz_trimming_report.txt")
     log:
-        os.path.join(DIR_LOGS, "adaptor_trimming.{sample}.part_{splitid}.log")
+        os.path.join(DIR_LOGS, "adaptor_trimming.{sample}.{splitid}.log")
+    params:
+        dir = os.path.join(DIR_OUT, "trimmed")
     conda:
         conda_env
     threads:
-        4
+        10
     shell:
         '''
-        cutadapt \\
-            -j {threads} \\
-            -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA \\
-            -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \\
-            -o {output.r1} \\
-            -p {output.r2} \\
-            {input.r1} \\
-            {input.r2} \\
-            &> "{log}"
+        if [[ {threads} -gt 8 ]]; then
+            cores=2
+        else
+            cores=1
+        fi
+
+        trim_galore \\
+          --paired \\
+          --gzip \\
+          --cores $cores \\
+          --quality 20 \\
+          --fastqc \\
+          -o "{params.dir}" \\
+          {input:q} &> "{log}"
         '''
 
 ##############################################################################
@@ -324,23 +331,21 @@ rule adaptor_trimming:
 
 rule barcode_id:
     input:
-        r1 = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.trimmed.fastq.gz"),
-        r2 = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.trimmed.fastq.gz")
+        r1 = os.path.join(DIR_OUT, "trimmed", "{sample}_R1.part_{splitid}_val_1.fq.gz"),
+        r2 = os.path.join(DIR_OUT, "trimmed", "{sample}_R2.part_{splitid}_val_2.fq.gz")
     output:
-        r1_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz")),
-        r2_barcoded = temp(os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz"))
+        r1_barcoded = os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz"),
+        r2_barcoded = os.path.join(DIR_OUT, "fastqs", "{sample}_R2.part_{splitid}.barcoded.fastq.gz")
     log:
-        os.path.join(DIR_LOGS, "barcode_id.{sample}.part_{splitid}.log")
+        os.path.join(DIR_LOGS, "barcode_id.{sample}.{splitid}.log")
     conda:
         conda_env
-    threads:
-        1
     shell:
         '''
         java -jar "{barcode_id_jar}" \\
-            --input1 "{input.r1}" --input2 "{input.r2}" \\
-            --output1 "{output.r1_barcoded}" --output2 "{output.r2_barcoded}" \\
-            --config "{barcode_config}" &> "{log}"
+          --input1 "{input.r1}" --input2 "{input.r2}" \\
+          --output1 "{output.r1_barcoded}" --output2 "{output.r2_barcoded}" \\
+          --config "{barcode_config}" &> "{log}"
         '''
 
 ##############################################################################
