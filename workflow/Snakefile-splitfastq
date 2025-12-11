@@ -353,15 +353,17 @@ rule barcode_id:
 ##############################################################################
 
 rule split_bpm_dpm:
+    wildcard_constraints:
+        read="R1|R2"
     input:
-        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded.fastq.gz")
+        os.path.join(DIR_OUT, "fastqs", "{sample}_{read}.part_{splitid}.barcoded.fastq.gz")
     output:
-        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_dpm.fastq.gz"),
-        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_bpm.fastq.gz"),
-        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_other.fastq.gz"),
-        os.path.join(DIR_OUT, "fastqs", "{sample}_R1.part_{splitid}.barcoded_short.fastq.gz")
+        os.path.join(DIR_OUT, "fastqs", "{sample}_{read}.part_{splitid}.barcoded_dpm.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_{read}.part_{splitid}.barcoded_bpm.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_{read}.part_{splitid}.barcoded_other.fastq.gz"),
+        os.path.join(DIR_OUT, "fastqs", "{sample}_{read}.part_{splitid}.barcoded_short.fastq.gz")
     log:
-        os.path.join(DIR_LOGS, "split_bpm_dpm.{sample}.{splitid}.log")
+        os.path.join(DIR_LOGS, "split_bpm_dpm.{sample}.{read}.{splitid}.log")
     params:
         format = f"--format '{barcode_format}'" if barcode_format not in (None, "") else ""
     conda:
@@ -382,7 +384,7 @@ rule assign_and_split_fastqs_per_sample:
             splitid=SPLITIDS
         ),
         dpm_fastqs_r2 = expand(
-            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded.fastq.gz"),
+            os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded_dpm.fastq.gz"),
             splitid=SPLITIDS
         ),
         bpm_fastqs = expand(
