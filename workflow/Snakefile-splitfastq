@@ -252,11 +252,11 @@ rule split_fastq:
     input:
         lambda wildcards: SAMPLES_DICT[wildcards.sample][wildcards.read]
     output:
-        temp(expand(os.path.join(temp_dir, "{{sample}}_{{read}}.part_{splitid}.fastq"), splitid=SPLITIDS))
+        temp(expand(os.path.join(DIR_OUT, "split_fastq", "{{sample}}_{{read}}.part_{splitid}.fastq"), splitid=SPLITIDS))
     log:
         os.path.join(DIR_LOGS, "split_fastq.{sample}.{read}.log")
     params:
-        dir = temp_dir,
+        dir = os.path.join(DIR_OUT, "split_fastq"),
         prefix = "{sample}_{read}.part_"
     conda:
         conda_env
@@ -274,9 +274,9 @@ rule split_fastq:
 
 rule compress_fastq:
     input:
-        os.path.join(temp_dir, "{sample_read}.part_{splitid}.fastq")
+        os.path.join(DIR_OUT, "split_fastq", "{sample_read}.part_{splitid}.fastq")
     output:
-        os.path.join(temp_dir, "{sample_read}.part_{splitid}.fastq.gz")
+        os.path.join(DIR_OUT, "split_fastq", "{sample_read}.part_{splitid}.fastq.gz")
     conda:
         conda_env
     threads:
@@ -292,8 +292,8 @@ rule compress_fastq:
 
 rule adaptor_trimming:
     input:
-        [os.path.join(temp_dir, "{sample}_R1.part_{splitid}.fastq.gz"),
-         os.path.join(temp_dir, "{sample}_R2.part_{splitid}.fastq.gz")]
+        [os.path.join(DIR_OUT, "split_fastq", "{sample}_R1.part_{splitid}.fastq.gz"),
+         os.path.join(DIR_OUT, "split_fastq", "{sample}_R2.part_{splitid}.fastq.gz")]
     output:
          os.path.join(DIR_OUT, "trimmed", "{sample}_R1.part_{splitid}_val_1.fq.gz"),
          os.path.join(DIR_OUT, "trimmed", "{sample}_R1.part_{splitid}.fastq.gz_trimming_report.txt"),
