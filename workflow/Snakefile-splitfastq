@@ -171,28 +171,28 @@ SPLITIDS = [f"{x:02d}" for x in NUM_CHUNKS]
 # Define TARGETS (antibody IDs and unassigned categories)
 ##############################################################################
 
-if generate_splitbams:
-    # Read barcode config file, skipping header lines and comments
-    # Only extract entries that start with BEAD_ (antibody barcodes, not DPM barcodes)
-    bead_barcodes = []
-    with open(barcode_config, 'r') as f:
-        for line in f:
-            line = line.strip()
-            # Skip empty lines, comments, and header lines
-            if not line or line.startswith('#') or line.startswith('READ'):
-                continue
-            # Parse tab-separated lines: DPM\tBEAD_AB1-A1\t...
-            parts = line.split('\t')
-            if len(parts) >= 2 and parts[0] == 'DPM' and parts[1].startswith('BEAD_'):
-                bead_barcodes.append(parts[1])
+def get_targets(barcode_config_file):
+    df = pd.read_csv(
+        barcode_config,
+        sep="\t",
+        names=["Tag", "Name", "Sequence", "Number"],
+        comment="#",
+        skip_blank_lines=True,
+        on_bad_lines="error",
+    ).dropna()
+    targets = [x.replace("BEAD_", "") for x in df["Name"] if "BEAD_" in x]
+    return list(set(targets))
 
-    BEAD_BARCODES = sorted(set(bead_barcodes))
-    TARGETS = sorted(BEAD_BARCODES + ["none", "uncertain", "ambiguous", "filtered", "BPM"])
-    print(f"Found {len(BEAD_BARCODES)} antibody targets", file=sys.stderr)
-    print(f"Targets: {', '.join(TARGETS)}", file=sys.stderr)
-else:
-    print("ERROR: generate_splitbams must be true to define TARGETS", file=sys.stderr)
-    sys.exit()
+TARGETS = get_targets(barcode_config)
+
+print("Detected the following targets in the barcode config file:", TARGETS, file=sys.stderr)
+if generate_splitbams:
+    TARGETS += ['ambiguous', 'none', 'uncertain', 'filtered']
+    print("  Adding 'ambiguous', 'none', 'uncertain', and 'filtered' to the list of targets.", file=sys.stderr)
+
+# check that target names only contain alphanumeric characters, underscores, and hyphens
+assert all(re.match(r'[a-zA-Z0-9_-]+', target) is not None for target in TARGETS), \
+    "Target names must only contain alphanumeric characters, underscores, and hyphens."
 
 ##############################################################################
 # Define output files
