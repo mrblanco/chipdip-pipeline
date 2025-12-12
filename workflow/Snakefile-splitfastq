@@ -142,6 +142,7 @@ else:
 split_fastq = os.path.join(DIR_SCRIPTS, "bash", "split_fastq.sh")
 barcode_id_jar = os.path.join(DIR_SCRIPTS, "java", "BarcodeIdentification_v1.2.0.jar")
 split_bpm_dpm = os.path.join(DIR_SCRIPTS, "python", "split_bpm_dpm.py")
+assign_and_split_fastqs = os.path.join(DIR_SCRIPTS, "python", "assign_and_split_fastqs.py")
 
 ##############################################################################
 # Define directories
@@ -151,21 +152,14 @@ DIR_LOGS = os.path.join(DIR_OUT, "logs")
 CONFIG = os.path.join(DIR_LOGS, f"config_{run_date}.yaml")
 
 ##############################################################################
-# Load sample information
+# Get sample files and targets
 ##############################################################################
 
 with open(samples) as f:
-    SAMPLES_DICT = json.load(f)
+    FILES = json.load(f)
+ALL_SAMPLES = sorted(FILES.keys())
 
-ALL_SAMPLES = list(SAMPLES_DICT.keys())
-print(f"Samples to be processed: {', '.join(ALL_SAMPLES)}", file=sys.stderr)
-
-##############################################################################
-# Define split IDs for parallel processing
-##############################################################################
-
-NUM_CHUNKS = list(range(0, num_chunks))
-SPLITIDS = [f"{x:02d}" for x in NUM_CHUNKS]
+NUM_CHUNKS = [f"{i:02}" for i in range(num_chunks)]
 
 ##############################################################################
 # Define TARGETS (antibody IDs and unassigned categories)
@@ -250,9 +244,9 @@ rule split_fastq:
     wildcard_constraints:
         read="R1|R2"
     input:
-        lambda wildcards: SAMPLES_DICT[wildcards.sample][wildcards.read]
+        lambda wildcards: FILES[wildcards.sample][wildcards.read]
     output:
-        temp(expand(os.path.join(DIR_OUT, "split_fastq", "{{sample}}_{{read}}.part_{splitid}.fastq"), splitid=SPLITIDS))
+        temp(expand(os.path.join(DIR_OUT, "split_fastq", "{{sample}}_{{read}}.part_{splitid}.fastq"), splitid=NUM_CHUNKS))
     log:
         os.path.join(DIR_LOGS, "split_fastq.{sample}.{read}.log")
     params:
@@ -381,15 +375,15 @@ rule assign_and_split_fastqs_per_sample:
     input:
         dpm_fastqs_r1 = expand(
             os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_dpm.fastq.gz"),
-            splitid=SPLITIDS
+            splitid=NUM_CHUNKS
         ),
         dpm_fastqs_r2 = expand(
             os.path.join(DIR_OUT, "fastqs", "{{sample}}_R2.part_{splitid}.barcoded_dpm.fastq.gz"),
-            splitid=SPLITIDS
+            splitid=NUM_CHUNKS
         ),
         bpm_fastqs = expand(
             os.path.join(DIR_OUT, "fastqs", "{{sample}}_R1.part_{splitid}.barcoded_bpm.fastq.gz"),
-            splitid=SPLITIDS
+            splitid=NUM_CHUNKS
         ),
         config = CONFIG
     output:
@@ -416,7 +410,7 @@ rule assign_and_split_fastqs_per_sample:
         4
     shell:
         '''
-        python "{DIR_SCRIPTS}/python/assign_and_split_fastqs.py" \\
+        python "{assign_and_split_fastqs}" \\
             --dpm_fastqs_r1 {input.dpm_fastqs_r1} \\
             --dpm_fastqs_r2 {input.dpm_fastqs_r2} \\
             --bpm_fastqs {input.bpm_fastqs} \\
